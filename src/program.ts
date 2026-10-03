@@ -1,0 +1,428 @@
+import { Command, CommanderError, Option } from 'commander';
+
+import {
+  commandOf,
+  fetchCatalog,
+  flagOf,
+  inputOf,
+  kindOf,
+  loadCatalog,
+} from './catalog.js';
+import { commandFor, deleteCredential, loadCredential } from './credentials.js';
+import { selectEnvironment, type Environment } from './environments.js';
+import { CliError, EXIT, type ExitCode } from './errors.js';
+import {
+  completeDeviceLogin,
+  pendingLogin,
+  startDeviceLogin,
+} from './login.js';
+import { withServer, type CatalogTool, type Connection } from './mcp.js';
+import { outputMode, printData, say } from './output.js';
+import type { Runtime } from './runtime.js';
+import { VERSION } from './version.js';
+import { findLink, removeLink, workspaceFor, writeLink } from './workspace.js';
+
+const BUILT_INS = ['login', 'logout', 'whoami', 'tools', 'link', 'unlink'];
+/** Options every command has; a tool input with one of these names is not a flag. */
+const GLOBAL_OPTIONS = new Set([
+  'env',
+  'json',
+  'workspace',
+  'input',
+  'inputFile',
+]);
+/** Global options that take a value, so the word after one is not a command. */
+const VALUED_GLOBALS = new Set(['--env', '--workspace']);
+
+interface GlobalOptions {
+  readonly env?: string;
+  readonly json?: boolean;
+  readonly workspace?: string;
+}
+
+/** The command words before any flag: `simulations list-runs`. */
+function commandWords(argv: readonly string[]): {
+  words: string[];
+  env: string | undefined;
+  help: boolean;
+} {
+  const words: string[] = [];
+  let env: string | undefined;
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = argv[index] ?? '';
+    if (token === '--env') env = argv[index + 1];
+    if (token.startsWith('--env=')) env = token.slice('--env='.length);
+    if (VALUED_GLOBALS.has(token)) {
+      index += 1;
+    } else if (!token.startsWith('-') && words.length < 2) {
+      words.push(token);
+    }
+  }
+  return { words, env, help: argv.includes('--help') || argv.includes('-h') };
+}
+
+function globalsOf(command: Command): GlobalOptions {
+  return command.optsWithGlobals<GlobalOptions>();
+}
+
+/** One tool as `agentrail <area> <action>`, its inputs as flags. */
+function addToolCommand(
+  area: Command,
+  tool: CatalogTool,
+  runtime: Runtime,
+  environment: Environment,
+): void {
+  const { action } = commandOf(tool.name);
+  const command = area
+    .command(action)
+    .summary(tool.title ?? tool.name)
+    .description(tool.description ?? tool.title ?? tool.name);
+  const required = new Set(tool.inputSchema.required ?? []);
+  for (const [property, schema] of Object.entries(
+    tool.inputSchema.properties ?? {},
+  )) {
+    // The workspace comes from --workspace, AGENTRAIL_WORKSPACE or the link.
+    if (property === 'workspaceId' || GLOBAL_OPTIONS.has(property)) continue;
+    const flag = flagOf(property);
+    const value = kindOf(schema).kind === 'boolean' ? '[value]' : '<value>';
+    const description = `${schema.description ?? ''}${required.has(property) ? ' (required)' : ''}`;
+    command.addOption(new Option(`--${flag} ${value}`, description.trim()));
+  }
+  command
+    .option(
+      '--input <json>',
+      'The whole input as a JSON object; flags override it.',
+    )
+    .option(
+      '--input-file <path>',
+      'The whole input from a JSON file; flags override it.',
+    )
+    .action(async (options: Record<string, unknown>, self: Command) => {
+      const globals = globalsOf(self);
+      const workspaceId = await workspaceFor(
+        runtime,
+        environment,
+        globals.workspace,
+      );
+      const input = await inputOf(tool, options, workspaceId, runtime.cwd);
+      const reply = await withServer(runtime, environment, (server) =>
+        server.callTool(tool.name, input),
+      );
+      if (reply.kind === 'refused') {
+        throw new CliError(EXIT.refused, reply.message);
+      }
+      say(runtime, reply.summary);
+      printData(
+        runtime,
+        outputMode(runtime, globals.json === true),
+        reply.data,
+      );
+    });
+}
+
+/**
+ * The commands of one area from the catalog. A command the kept catalog does
+ * not have is looked up on the server before it is called unknown.
+ */
+async function addAreaCommands(
+  program: Command,
+  runtime: Runtime,
+  environment: Environment,
+  words: readonly string[],
+  help: boolean,
+): Promise<void> {
+  const [areaName = '', actionName] = words;
+  const matching = (tools: readonly CatalogTool[]) =>
+    tools.filter((tool) => commandOf(tool.name).area === areaName);
+  let catalog = await loadCatalog(runtime, environment, help ? 'help' : 'run');
+  const known = (tools: readonly CatalogTool[]) =>
+    matching(tools).length > 0 &&
+    (actionName === undefined ||
+      matching(tools).some(
+        (tool) => commandOf(tool.name).action === actionName,
+      ));
+  if (!known(catalog.tools) && catalog.cached && !help) {
+    catalog = await fetchCatalog(runtime, environment);
+  }
+  const tools = matching(catalog.tools);
+  if (tools.length === 0) {
+    throw new CliError(
+      EXIT.usage,
+      `Unknown command "${areaName}". Run agentrail tools to see every command.`,
+    );
+  }
+  const area = program
+    .command(areaName)
+    .description(`Agentrail ${areaName} commands.`)
+    .showHelpAfterError('Run agentrail tools to see every command.');
+  for (const tool of tools) addToolCommand(area, tool, runtime, environment);
+}
+
+async function everyWorkspace(
+  server: Connection,
+): Promise<{ id: string; name: string }[]> {
+  const workspaces: { id: string; name: string }[] = [];
+  let cursor: string | undefined;
+  do {
+    const reply = await server.callTool('workspaces_list', {
+      limit: 100,
+      ...(cursor === undefined ? {} : { cursor }),
+    });
+    if (reply.kind === 'refused')
+      throw new CliError(EXIT.refused, reply.message);
+    const page = reply.data as {
+      items: { id: string; name: string }[];
+      nextCursor: string | null;
+    };
+    workspaces.push(...page.items);
+    cursor = page.nextCursor ?? undefined;
+  } while (cursor !== undefined);
+  return workspaces;
+}
+
+function builtIns(program: Command, runtime: Runtime): void {
+  const environmentOf = (command: Command) =>
+    selectEnvironment(globalsOf(command).env, runtime);
+
+  program
+    .command('login')
+    .description(
+      'Sign in to Agentrail in your browser. Without a terminal, the first run prints the sign-in URL and code as JSON and the next run finishes signing in.',
+    )
+    .option(
+      '--insecure-storage',
+      'Keep the credential in a file only you can read, instead of the OS keychain.',
+    )
+    .action(async (options: { insecureStorage?: boolean }, self: Command) => {
+      const environment = environmentOf(self);
+      const storage = options.insecureStorage === true ? 'file' : 'keychain';
+      const next = commandFor(environment, 'login');
+      if (!runtime.stdinIsTTY) {
+        const pending = await pendingLogin(runtime, environment);
+        if (!pending) {
+          const started = await startDeviceLogin(runtime, environment, storage);
+          printData(runtime, 'json', {
+            status: 'pending',
+            verificationUrl:
+              started.verificationUriComplete ?? started.verificationUri,
+            userCode: started.userCode,
+            expiresAt: started.expiresAt,
+            next,
+          });
+          say(
+            runtime,
+            `Ask the user to open the URL and confirm code ${started.userCode}, then run ${next} again.`,
+          );
+          return;
+        }
+        const credential = await completeDeviceLogin(
+          runtime,
+          environment,
+          pending,
+        );
+        printData(runtime, 'json', {
+          status: 'signed_in',
+          environment: environment.name,
+          email: credential.email ?? null,
+        });
+        return;
+      }
+      const started = await startDeviceLogin(runtime, environment, storage);
+      const url = started.verificationUriComplete ?? started.verificationUri;
+      say(
+        runtime,
+        `To sign in to Agentrail ${environment.name}, open ${url} and confirm the code ${started.userCode}.`,
+      );
+      runtime.openBrowser(url);
+      const credential = await completeDeviceLogin(
+        runtime,
+        environment,
+        started,
+      );
+      say(
+        runtime,
+        `Signed in to Agentrail ${environment.name}${credential.email ? ` as ${credential.email}` : ''}.`,
+      );
+    });
+
+  program
+    .command('logout')
+    .description('Forget this computer’s sign-in.')
+    .action(async (_options: unknown, self: Command) => {
+      const environment = environmentOf(self);
+      const removed = await deleteCredential(runtime, environment);
+      say(
+        runtime,
+        removed
+          ? `Signed out of Agentrail ${environment.name}.`
+          : `Not signed in to Agentrail ${environment.name}.`,
+      );
+    });
+
+  program
+    .command('whoami')
+    .description(
+      'Show who you are signed in as and the workspace commands use.',
+    )
+    .action(async (_options: unknown, self: Command) => {
+      const environment = environmentOf(self);
+      const stored = await loadCredential(runtime, environment);
+      const reply = await withServer(runtime, environment, (server) =>
+        server.callTool('workspaces_list', {}),
+      );
+      if (reply.kind === 'refused')
+        throw new CliError(EXIT.refused, reply.message);
+      const linked = await workspaceFor(
+        runtime,
+        environment,
+        globalsOf(self).workspace,
+      );
+      const data = reply.data as { defaultWorkspaceId: string };
+      say(runtime, reply.summary);
+      printData(runtime, outputMode(runtime, globalsOf(self).json === true), {
+        environment: environment.name,
+        email: stored?.credential.email ?? null,
+        signedInUntil: stored?.credential.expiresAt ?? null,
+        workspaceId: linked ?? data.defaultWorkspaceId,
+      });
+    });
+
+  program
+    .command('tools')
+    .description('List every Agentrail command your role can use.')
+    .action(async (_options: unknown, self: Command) => {
+      const environment = environmentOf(self);
+      const { tools } = await fetchCatalog(runtime, environment);
+      const mode = outputMode(runtime, globalsOf(self).json === true);
+      printData(
+        runtime,
+        mode,
+        tools.map((tool) => {
+          const { area, action } = commandOf(tool.name);
+          return {
+            command: `${area} ${action}`,
+            title: tool.title ?? tool.name,
+            readOnly: tool.annotations?.readOnlyHint === true,
+            ...(mode === 'json' ? { description: tool.description ?? '' } : {}),
+          };
+        }),
+      );
+      say(
+        runtime,
+        'Run agentrail <area> <action> --help for a command’s inputs.',
+      );
+    });
+
+  program
+    .command('link')
+    .description(
+      'Use a workspace for every command run in this directory and those under it.',
+    )
+    .argument(
+      '[workspaceId]',
+      'The workspace; agentrail workspaces list shows them.',
+    )
+    .action(
+      async (
+        workspaceId: string | undefined,
+        _options: unknown,
+        self: Command,
+      ) => {
+        const environment = environmentOf(self);
+        if (workspaceId === undefined) {
+          throw new CliError(
+            EXIT.usage,
+            'Name the workspace: agentrail link <workspaceId>. Run agentrail workspaces list to see them.',
+          );
+        }
+        const workspaces = await withServer(
+          runtime,
+          environment,
+          everyWorkspace,
+        );
+        const workspace = workspaces.find((one) => one.id === workspaceId);
+        if (!workspace) {
+          throw new CliError(
+            EXIT.refused,
+            `No workspace ${workspaceId} in your organization. Run agentrail workspaces list to see them.`,
+          );
+        }
+        const path = await writeLink(runtime.cwd, {
+          environment: environment.name,
+          workspaceId: workspace.id,
+          workspaceName: workspace.name,
+        });
+        say(
+          runtime,
+          `Commands under ${runtime.cwd} now use "${workspace.name}" in ${environment.name} (${path}).`,
+        );
+      },
+    );
+
+  program
+    .command('unlink')
+    .description('Stop using the workspace linked to this directory.')
+    .action(async () => {
+      const found = await findLink(runtime.cwd);
+      if (!found) {
+        say(runtime, 'No workspace is linked here.');
+        return;
+      }
+      await removeLink(found.path);
+      say(runtime, `Removed ${found.path}.`);
+    });
+}
+
+function baseProgram(runtime: Runtime): Command {
+  return new Command('agentrail')
+    .description(
+      'Agentrail from a terminal or an AI coding agent. Run agentrail tools for every product command, and agentrail <area> --help for one area.',
+    )
+    .version(VERSION)
+    .option(
+      '--env <name>',
+      'prod or dev. Defaults to AGENTRAIL_ENV, then prod.',
+    )
+    .option(
+      '--workspace <id>',
+      'The workspace to use. Defaults to AGENTRAIL_WORKSPACE, then this directory’s link, then your default.',
+    )
+    .option('--json', 'Print data as JSON, as when output is not a terminal.')
+    .exitOverride()
+    .configureOutput({
+      writeOut: (text) => {
+        runtime.stdout.write(text);
+      },
+      writeErr: (text) => {
+        runtime.stderr.write(text);
+      },
+    });
+}
+
+/** Runs one command line and returns its exit code. */
+export async function run(
+  runtime: Runtime,
+  argv: readonly string[],
+): Promise<ExitCode> {
+  try {
+    const program = baseProgram(runtime);
+    builtIns(program, runtime);
+    const { words, env, help } = commandWords(argv);
+    const [first] = words;
+    if (first !== undefined && first !== 'help' && !BUILT_INS.includes(first)) {
+      const environment = selectEnvironment(env, runtime);
+      await addAreaCommands(program, runtime, environment, words, help);
+    }
+    await program.parseAsync([...argv], { from: 'user' });
+    return EXIT.ok;
+  } catch (error) {
+    if (error instanceof CommanderError) {
+      return error.exitCode === 0 ? EXIT.ok : EXIT.usage;
+    }
+    if (error instanceof CliError) {
+      say(runtime, error.message);
+      return error.exitCode;
+    }
+    throw error;
+  }
+}

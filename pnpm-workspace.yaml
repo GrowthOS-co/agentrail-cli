@@ -1,0 +1,5 @@
+# Supply-chain cooldown, as in argus: refuse versions published in the last
+# three days, so a compromised release is not installed before it is pulled.
+minimumReleaseAge: 4320
+allowBuilds:
+  esbuild: true
