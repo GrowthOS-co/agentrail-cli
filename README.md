@@ -52,13 +52,13 @@ just `agentrail`: it belongs to someone else.
 
 ## Exit codes
 
-| Code | Meaning                                                      |
-| ---- | ------------------------------------------------------------ |
-| 0    | Done                                                         |
-| 1    | Agentrail refused: not found, not allowed, or invalid input  |
-| 2    | The command line is wrong                                    |
-| 3    | Not signed in, or the sign-in expired: run `agentrail login` |
-| 4    | Agentrail or the network could not be reached                |
+| Code | Meaning                                                                           |
+| ---- | --------------------------------------------------------------------------------- |
+| 0    | Done                                                                              |
+| 1    | Agentrail refused: not found, not allowed, or invalid input                       |
+| 2    | The command line is wrong, or this CLI is too old: the message says how to update |
+| 3    | Not signed in, or the sign-in expired: run `agentrail login`                      |
+| 4    | Agentrail or the network could not be reached                                     |
 
 ## Releasing
 

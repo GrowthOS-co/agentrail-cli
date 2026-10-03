@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import type { Credential } from '../src/credentials.js';
 import { run } from '../src/program.js';
+import { VERSION } from '../src/version.js';
 import {
   startFakeAgentrail,
   type FakeAgentrail,
@@ -101,6 +102,32 @@ describe('product commands', () => {
     expect(agentrail.toolCalls.map((call) => call.name)).toEqual([
       'competitors_list',
     ]);
+  });
+
+  // CLI-008: the server can only refuse an outdated CLI it can recognise,
+  // and its refusal must reach the person with the update command.
+  it('names its version to the server, and passes on the server’s refusal of an outdated CLI', async () => {
+    const cli = await signedIn();
+    expect(
+      await run(cli.runtime, ['--env', 'dev', 'competitors', 'list']),
+    ).toBe(0);
+    expect(new Set(agentrail.userAgents)).toEqual(
+      new Set([`agentrail-cli/${VERSION}`]),
+    );
+
+    agentrail.refuseOutdatedCli = true;
+    const outdated = await signedIn();
+    expect(
+      await run(outdated.runtime, [
+        '--env',
+        'dev',
+        'competitors',
+        'list',
+        '--no-update-check',
+      ]),
+    ).toBe(2);
+    expect(outdated.stderr()).toContain('npm install -g agentrail-cli@latest');
+    expect(outdated.stderr()).not.toContain('Run agentrail tools');
   });
 
   it('refuses prod until it exists, pointing at dev', async () => {
