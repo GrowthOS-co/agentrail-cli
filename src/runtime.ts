@@ -1,6 +1,8 @@
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { constants } from 'node:fs';
+import { access } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 
 import { Entry } from '@napi-rs/keyring';
 
@@ -11,6 +13,13 @@ export interface Keychain {
   get(account: string): string | null;
   set(account: string, secret: string): void;
   delete(account: string): boolean;
+}
+
+/** What a finished program said and how it ended. */
+export interface Executed {
+  readonly exitCode: number;
+  readonly stdout: string;
+  readonly stderr: string;
 }
 
 export interface Stream {
@@ -30,6 +39,8 @@ export interface Runtime {
   readonly cwd: string;
   /** Where the CLI keeps its own files: pending sign-ins, the catalog cache. */
   readonly configDir: string;
+  /** The user's home, where coding agents keep their configuration. */
+  readonly homeDir: string;
   readonly stdout: Stream;
   readonly stderr: Stream;
   readonly stdinIsTTY: boolean;
@@ -38,6 +49,13 @@ export interface Runtime {
   readonly now: () => Date;
   readonly sleep: (milliseconds: number) => Promise<void>;
   readonly openBrowser: (url: string) => void;
+  /** Whether a program is on the PATH. */
+  readonly hasCommand: (name: string) => Promise<boolean>;
+  /** Runs a program directly, without a shell, and waits for it. */
+  readonly exec: (
+    command: string,
+    args: readonly string[],
+  ) => Promise<Executed>;
 }
 
 const KEYCHAIN_SERVICE = 'agentrail-cli';
@@ -71,6 +89,41 @@ function openInBrowser(url: string): void {
   child.unref();
 }
 
+async function onPath(name: string): Promise<boolean> {
+  const extensions =
+    process.platform === 'win32'
+      ? (process.env.PATHEXT ?? '.EXE;.CMD;.BAT').split(';')
+      : [''];
+  const directories = (process.env.PATH ?? '').split(delimiter);
+  for (const directory of directories.filter(Boolean)) {
+    for (const extension of extensions) {
+      try {
+        await access(join(directory, `${name}${extension}`), constants.X_OK);
+        return true;
+      } catch {
+        // Not in this directory, or not executable there: look on.
+      }
+    }
+  }
+  return false;
+}
+
+function run(command: string, args: readonly string[]): Promise<Executed> {
+  return new Promise((resolve, reject) => {
+    execFile(command, [...args], (error, stdout, stderr) => {
+      if (error && typeof error.code !== 'number') {
+        reject(new Error(`Could not run ${command}`, { cause: error }));
+        return;
+      }
+      resolve({
+        exitCode: typeof error?.code === 'number' ? error.code : 0,
+        stdout,
+        stderr,
+      });
+    });
+  });
+}
+
 /** Node leaves `isTTY` undefined, not false, on a stream that is no terminal. */
 function isTerminal(stream: { readonly isTTY?: boolean }): boolean {
   return stream.isTTY ?? false;
@@ -82,6 +135,7 @@ export function processRuntime(): Runtime {
     environments: ENVIRONMENTS,
     cwd: process.cwd(),
     configDir: configDirOf(process.env),
+    homeDir: homedir(),
     stdout: {
       write: (text) => process.stdout.write(text),
       isTTY: isTerminal(process.stdout),
@@ -97,5 +151,7 @@ export function processRuntime(): Runtime {
     sleep: (milliseconds) =>
       new Promise((resolve) => setTimeout(resolve, milliseconds)),
     openBrowser: openInBrowser,
+    hasCommand: onPath,
+    exec: run,
   };
 }

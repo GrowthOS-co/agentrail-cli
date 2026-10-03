@@ -1,5 +1,6 @@
 import { Command, CommanderError, Option } from 'commander';
 
+import { agentsFrom, setUpAgents } from './agent-setup.js';
 import {
   commandOf,
   fetchCatalog,
@@ -9,6 +10,7 @@ import {
   loadCatalog,
 } from './catalog.js';
 import { commandFor, deleteCredential, loadCredential } from './credentials.js';
+import { diagnose } from './doctor.js';
 import { selectEnvironment, type Environment } from './environments.js';
 import { CliError, EXIT, type ExitCode } from './errors.js';
 import {
@@ -19,10 +21,22 @@ import {
 import { withServer, type CatalogTool, type Connection } from './mcp.js';
 import { outputMode, printData, say } from './output.js';
 import type { Runtime } from './runtime.js';
+import { newestVersion, updateNotice } from './updates.js';
 import { VERSION } from './version.js';
+import { isNewer } from './versions.js';
 import { findLink, removeLink, workspaceFor, writeLink } from './workspace.js';
 
-const BUILT_INS = ['login', 'logout', 'whoami', 'tools', 'link', 'unlink'];
+const BUILT_INS = [
+  'login',
+  'logout',
+  'whoami',
+  'tools',
+  'link',
+  'unlink',
+  'doctor',
+  'update',
+  'agent',
+];
 /** Options every command has; a tool input with one of these names is not a flag. */
 const GLOBAL_OPTIONS = new Set([
   'env',
@@ -30,6 +44,7 @@ const GLOBAL_OPTIONS = new Set([
   'workspace',
   'input',
   'inputFile',
+  'updateCheck',
 ]);
 /** Global options that take a value, so the word after one is not a command. */
 const VALUED_GLOBALS = new Set(['--env', '--workspace']);
@@ -360,6 +375,99 @@ function builtIns(program: Command, runtime: Runtime): void {
     );
 
   program
+    .command('doctor')
+    .description('Check what Agentrail commands need, and say what to fix.')
+    .action(async (_options: unknown, self: Command) => {
+      const environment = environmentOf(self);
+      const { checks, exitCode } = await diagnose(runtime, environment);
+      printData(
+        runtime,
+        outputMode(runtime, globalsOf(self).json === true),
+        checks,
+      );
+      if (exitCode !== EXIT.ok) {
+        const first = checks.find((check) => check.status === 'failed');
+        throw new CliError(exitCode, first?.detail ?? 'A check failed.');
+      }
+    });
+
+  program
+    .command('update')
+    .description(
+      'Show whether a newer agentrail-cli exists, and how to install it.',
+    )
+    .action(async (_options: unknown, self: Command) => {
+      let found;
+      try {
+        found = await newestVersion(runtime);
+      } catch (error) {
+        throw new CliError(
+          EXIT.unavailable,
+          'Could not reach the npm registry.',
+          {
+            cause: error,
+          },
+        );
+      }
+      const upToDate =
+        found.newest === undefined || !isNewer(found.newest, found.installed);
+      printData(runtime, outputMode(runtime, globalsOf(self).json === true), {
+        ...found,
+        upToDate,
+      });
+      say(
+        runtime,
+        upToDate
+          ? `agentrail-cli ${found.installed} is the newest on ${found.channel}.`
+          : `Update to ${String(found.newest)}: ${found.upgrade}`,
+      );
+    });
+
+  program
+    .command('agent')
+    .description('Set up coding agents to use Agentrail.')
+    .command('setup')
+    .description(
+      'Install the Agentrail skill and MCP server into Claude Code, Codex and Cursor, for every project of yours.',
+    )
+    .option(
+      '--only <agents>',
+      'Only these, comma-separated: claude, codex, cursor.',
+    )
+    .option(
+      '--project',
+      'Into this repository instead, for everyone working in it.',
+    )
+    .option(
+      '--read-only',
+      'Use the read-only MCP server, which offers only tools that read.',
+    )
+    .action(
+      async (
+        options: { only?: string; project?: boolean; readOnly?: boolean },
+        self: Command,
+      ) => {
+        const environment = environmentOf(self);
+        const steps = await setUpAgents(runtime, environment, {
+          only: agentsFrom(options.only),
+          project: options.project === true,
+          readOnly: options.readOnly === true,
+        });
+        printData(
+          runtime,
+          outputMode(runtime, globalsOf(self).json === true),
+          steps,
+        );
+        if (steps.every((step) => step.status === 'skipped')) {
+          say(
+            runtime,
+            'No coding agent found: install Claude Code, Codex or Cursor first.',
+          );
+        }
+      },
+    );
+
+  program
     .command('unlink')
     .description('Stop using the workspace linked to this directory.')
     .action(async () => {
@@ -388,6 +496,7 @@ function baseProgram(runtime: Runtime): Command {
       'The workspace to use. Defaults to AGENTRAIL_WORKSPACE, then this directory’s link, then your default.',
     )
     .option('--json', 'Print data as JSON, as when output is not a terminal.')
+    .option('--no-update-check', 'Do not check npm for a newer version today.')
     .exitOverride()
     .configureOutput({
       writeOut: (text) => {
@@ -404,6 +513,9 @@ export async function run(
   runtime: Runtime,
   argv: readonly string[],
 ): Promise<ExitCode> {
+  // Asked alongside the command, so it never adds a request's wait; its
+  // notice goes to stderr once the command is done.
+  const notice = updateNotice(runtime, argv);
   try {
     const program = baseProgram(runtime);
     builtIns(program, runtime);
@@ -424,5 +536,8 @@ export async function run(
       return error.exitCode;
     }
     throw error;
+  } finally {
+    const text = await notice;
+    if (text !== undefined) say(runtime, text);
   }
 }

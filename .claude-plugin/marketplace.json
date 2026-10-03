@@ -1,0 +1,16 @@
+{
+  "name": "agentrail",
+  "owner": {
+    "name": "Agentrail"
+  },
+  "metadata": {
+    "description": "Agentrail for Claude Code: the Agentrail skill, for seeing how AI coding agents treat a brand's product."
+  },
+  "plugins": [
+    {
+      "name": "agentrail",
+      "source": "./",
+      "description": "The Agentrail skill: how to use Agentrail's tools from Claude Code."
+    }
+  ]
+}
