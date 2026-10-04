@@ -51,6 +51,8 @@ export async function testRuntime(options: {
   homeDir?: string;
   now?: () => Date;
   fetch?: typeof fetch;
+  /** Runs at each wait the CLI asks for, as if that long had passed. */
+  onSleep?: () => void;
   /** Programs on the PATH, and how each call to one ends. */
   commands?: Readonly<Record<string, (args: readonly string[]) => Executed>>;
 }): Promise<TestRuntime> {
@@ -95,6 +97,7 @@ export async function testRuntime(options: {
     now: options.now ?? (() => new Date()),
     sleep: (milliseconds) => {
       sleeps.push(milliseconds);
+      options.onSleep?.();
       return Promise.resolve();
     },
     openBrowser: (url) => {

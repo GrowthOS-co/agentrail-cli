@@ -277,6 +277,13 @@ function builtIns(program: Command, runtime: Runtime): void {
     .description('Forget this computer’s sign-in.')
     .action(async (_options: unknown, self: Command) => {
       const environment = environmentOf(self);
+      // Said first, as no sign-in removed here stops commands using it.
+      if (runtime.env.AGENTRAIL_TOKEN) {
+        say(
+          runtime,
+          'AGENTRAIL_TOKEN is still set, and commands use it: unset it to stop.',
+        );
+      }
       const removed = await deleteCredential(runtime, environment);
       const places = [
         ...(removed.file ? ['the credentials file'] : []),
@@ -298,12 +305,6 @@ function builtIns(program: Command, runtime: Runtime): void {
           ? `Not signed in to Agentrail ${environment.name}.`
           : `Signed out of Agentrail ${environment.name}: removed the sign-in from ${places.join(' and ')}.${unchecked}`,
       );
-      if (runtime.env.AGENTRAIL_TOKEN) {
-        say(
-          runtime,
-          'AGENTRAIL_TOKEN is still set, and commands use it: unset it to stop.',
-        );
-      }
     });
 
   program

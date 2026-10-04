@@ -2,7 +2,12 @@ import { join } from 'node:path';
 
 import type { Environment, EnvironmentName } from './environments.js';
 import { causeOf, CliError, EXIT } from './errors.js';
-import { readJson, removeFile, writePrivateJson } from './files.js';
+import {
+  isSystemError,
+  readJson,
+  removeFile,
+  writePrivateJson,
+} from './files.js';
 import type { Runtime } from './runtime.js';
 
 /** A sign-in to one environment: the tokens and where to refresh them. */
@@ -142,7 +147,16 @@ export async function saveCredential(
   }
   // A file from an earlier --insecure-storage sign-in would be read first,
   // hiding the one just kept in the keychain.
-  await removeFile(path);
+  try {
+    await removeFile(path);
+  } catch (error) {
+    if (!isSystemError(error)) throw error;
+    throw new CliError(
+      EXIT.usage,
+      `The sign-in is kept in the OS keychain, but ${path} could not be removed (${error.code ?? ''}), and commands read it first. Remove it, then run your command again.`,
+      { cause: error },
+    );
+  }
 }
 
 /** Where `logout` found a sign-in and removed it. */

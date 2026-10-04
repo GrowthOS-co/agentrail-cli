@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile, access } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile, access } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
@@ -170,5 +170,13 @@ describe('agentrail agent setup', () => {
     expect(JSON.parse(await readFile(cursorConfig, 'utf8'))).toEqual({
       mcpServers: { 'agentrail-dev': { url: MCP_URL } },
     });
+
+    // One it cannot read at all counts the same.
+    await rm(cursorConfig);
+    await mkdir(cursorConfig);
+    expect(await run(cli.runtime, ['--env', 'dev', 'agent', 'setup'])).toBe(2);
+    expect(cli.stderr()).toContain(
+      `${cursorConfig} could not be read (EISDIR)`,
+    );
   });
 });

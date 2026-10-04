@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 
 import { clientIdOf, type Environment } from './environments.js';
 import { CliError, EXIT } from './errors.js';
-import { readJson, writePrivateJson } from './files.js';
+import { isSystemError, readJson, writePrivateJson } from './files.js';
 import type { Runtime } from './runtime.js';
 
 export const AGENTS = ['claude', 'codex', 'cursor'] as const;
@@ -175,6 +175,9 @@ async function cursorConfig(path: string): Promise<Record<string, unknown>> {
     // Its text is never shown: other servers' entries can hold keys.
     if (error instanceof SyntaxError)
       throw unusable('is not valid JSON', error);
+    if (isSystemError(error)) {
+      throw unusable(`could not be read (${error.code ?? ''})`, error);
+    }
     throw error;
   }
   if (value === undefined) return {};
@@ -210,10 +213,19 @@ async function addCursorServer(
   }
   // Written whole, so Cursor never reads half of it, and readable only by
   // you, as other servers' entries can hold keys.
-  await writePrivateJson(path, {
-    ...config,
-    mcpServers: { ...servers, [name]: { url } },
-  });
+  try {
+    await writePrivateJson(path, {
+      ...config,
+      mcpServers: { ...servers, [name]: { url } },
+    });
+  } catch (error) {
+    if (!isSystemError(error)) throw error;
+    throw new CliError(
+      EXIT.usage,
+      `${path} could not be written (${error.code ?? ''}), so Cursor was not set up. Fix it, then run agentrail agent setup again.`,
+      { cause: error },
+    );
+  }
   return {
     agent: 'cursor',
     part: 'mcp',

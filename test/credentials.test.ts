@@ -1,4 +1,4 @@
-import { access, readdir, stat } from 'node:fs/promises';
+import { access, chmod, readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -78,7 +78,8 @@ describe('credentials', () => {
   });
 
   // Two commands started together both find the sign-in expiring; the one
-  // whose refresh lands second must use the first one's, not say "expired".
+  // whose refresh lands second must use the first one's, not say "expired",
+  // though the first stores it only a moment after the second is refused.
   it('uses the sign-in another command refreshed a moment earlier', async () => {
     const keychain = memoryKeychain();
     agentrail.refreshTokens.add('refresh-old');
@@ -88,9 +89,18 @@ describe('credentials', () => {
       const form = new URLSearchParams(
         typeof init?.body === 'string' ? init.body : '',
       );
+      // The other command's refresh spends the token first.
       if (form.get('grant_type') === 'refresh_token') {
-        // The other command's refresh spends the token and stores its own.
         agentrail.refreshTokens.delete('refresh-old');
+      }
+      return fetch(input, init);
+    };
+    const cli = await testRuntime({
+      mcpUrl: agentrail.mcpUrl,
+      keychain,
+      fetch: racing,
+      // It stores its sign-in while this one waits.
+      onSleep: () => {
         keychain.set(
           'dev',
           JSON.stringify(
@@ -101,13 +111,7 @@ describe('credentials', () => {
             }),
           ),
         );
-      }
-      return fetch(input, init);
-    };
-    const cli = await testRuntime({
-      mcpUrl: agentrail.mcpUrl,
-      keychain,
-      fetch: racing,
+      },
     });
 
     expect(
@@ -217,6 +221,35 @@ describe('credentials', () => {
       expect.stringContaining('dev.json'),
     );
 
-    expect(await run(cli.runtime, ['--env', 'dev', 'logout'])).toBe(3);
+    const withToken = {
+      ...cli.runtime,
+      env: { ...cli.runtime.env, AGENTRAIL_TOKEN: 'given-token' },
+    };
+    expect(await run(withToken, ['--env', 'dev', 'logout'])).toBe(3);
+    expect(cli.stderr()).toContain('AGENTRAIL_TOKEN is still set');
+  });
+
+  // An older file that stays is read before the keychain, so commands would
+  // keep using it: a sign-in that cannot remove it must say so.
+  it('says when an older credentials file cannot be removed after a keychain sign-in', async () => {
+    const cli = await testRuntime({
+      mcpUrl: agentrail.mcpUrl,
+      terminal: true,
+    });
+    agentrail.deviceAnswers.push('tokens');
+    expect(
+      await run(cli.runtime, ['--env', 'dev', 'login', '--insecure-storage']),
+    ).toBe(0);
+    const directory = join(cli.configDir, 'credentials');
+    await chmod(directory, 0o500);
+    try {
+      agentrail.deviceAnswers.push('tokens');
+      expect(await run(cli.runtime, ['--env', 'dev', 'login'])).toBe(2);
+      expect(cli.stderr()).toContain(
+        `${join(directory, 'dev.json')} could not be removed (EACCES)`,
+      );
+    } finally {
+      await chmod(directory, 0o700);
+    }
   });
 });
