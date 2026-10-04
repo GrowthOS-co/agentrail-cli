@@ -1,3 +1,5 @@
+import { inspect } from 'node:util';
+
 import { Command, CommanderError, Option } from 'commander';
 
 import { agentsFrom, setUpAgents } from './agent-setup.js';
@@ -9,22 +11,30 @@ import {
   kindOf,
   loadCatalog,
 } from './catalog.js';
-import { commandFor, deleteCredential, loadCredential } from './credentials.js';
+import { deleteCredential, loadCredential } from './credentials.js';
 import { diagnose } from './doctor.js';
 import { selectEnvironment, type Environment } from './environments.js';
 import { CliError, EXIT, type ExitCode } from './errors.js';
 import {
   completeDeviceLogin,
+  loginCommand,
   pendingLogin,
   startDeviceLogin,
 } from './login.js';
 import { withServer, type CatalogTool, type Connection } from './mcp.js';
 import { outputMode, printData, say } from './output.js';
 import type { Runtime } from './runtime.js';
-import { newestVersion, updateNotice } from './updates.js';
+import { newestVersion, UPDATE_TIMEOUT_MS, updateNotice } from './updates.js';
 import { VERSION } from './version.js';
 import { isNewer } from './versions.js';
-import { findLink, removeLink, workspaceFor, writeLink } from './workspace.js';
+import {
+  findLinkFile,
+  removeLink,
+  workspaceFor,
+  writeLink,
+} from './workspace.js';
+
+const ISSUES_URL = 'https://github.com/GrowthOS-co/agentrail-cli/issues';
 
 const BUILT_INS = [
   'login',
@@ -211,7 +221,7 @@ function builtIns(program: Command, runtime: Runtime): void {
     .action(async (options: { insecureStorage?: boolean }, self: Command) => {
       const environment = environmentOf(self);
       const storage = options.insecureStorage === true ? 'file' : 'keychain';
-      const next = commandFor(environment, 'login');
+      const next = loginCommand(environment, storage);
       if (!runtime.stdinIsTTY) {
         const pending = await pendingLogin(runtime, environment);
         if (!pending) {
@@ -230,10 +240,12 @@ function builtIns(program: Command, runtime: Runtime): void {
           );
           return;
         }
+        // Asking for a file on the finishing run is heard: it is how a
+        // sign-in the keychain could not keep is finished.
         const credential = await completeDeviceLogin(
           runtime,
           environment,
-          pending,
+          storage === 'file' ? { ...pending, storage } : pending,
         );
         printData(runtime, 'json', {
           status: 'signed_in',
@@ -265,12 +277,33 @@ function builtIns(program: Command, runtime: Runtime): void {
     .description('Forget this computer’s sign-in.')
     .action(async (_options: unknown, self: Command) => {
       const environment = environmentOf(self);
+      // Said first, as no sign-in removed here stops commands using it.
+      if (runtime.env.AGENTRAIL_TOKEN) {
+        say(
+          runtime,
+          'AGENTRAIL_TOKEN is still set, and commands use it: unset it to stop.',
+        );
+      }
       const removed = await deleteCredential(runtime, environment);
+      const places = [
+        ...(removed.file ? ['the credentials file'] : []),
+        ...(removed.keychain ? ['the OS keychain'] : []),
+      ];
+      const unchecked =
+        removed.keychainFailure === undefined
+          ? ''
+          : ` Could not check the OS keychain (${removed.keychainFailure}).`;
+      if (places.length === 0 && removed.keychainFailure !== undefined) {
+        throw new CliError(
+          EXIT.signIn,
+          `No credentials file for Agentrail ${environment.name}.${unchecked}`,
+        );
+      }
       say(
         runtime,
-        removed
-          ? `Signed out of Agentrail ${environment.name}.`
-          : `Not signed in to Agentrail ${environment.name}.`,
+        places.length === 0
+          ? `Not signed in to Agentrail ${environment.name}.`
+          : `Signed out of Agentrail ${environment.name}: removed the sign-in from ${places.join(' and ')}.${unchecked}`,
       );
     });
 
@@ -281,7 +314,11 @@ function builtIns(program: Command, runtime: Runtime): void {
     )
     .action(async (_options: unknown, self: Command) => {
       const environment = environmentOf(self);
-      const stored = await loadCredential(runtime, environment);
+      // AGENTRAIL_TOKEN wins over a stored sign-in, so it is the one shown.
+      const given = Boolean(runtime.env.AGENTRAIL_TOKEN);
+      const stored = given
+        ? undefined
+        : await loadCredential(runtime, environment);
       const reply = await withServer(runtime, environment, (server) =>
         server.callTool('workspaces_list', {}),
       );
@@ -294,6 +331,7 @@ function builtIns(program: Command, runtime: Runtime): void {
       );
       const data = reply.data as { defaultWorkspaceId: string };
       say(runtime, reply.summary);
+      if (given) say(runtime, 'Signed in with the token in AGENTRAIL_TOKEN.');
       printData(runtime, outputMode(runtime, globalsOf(self).json === true), {
         environment: environment.name,
         email: stored?.credential.email ?? null,
@@ -397,18 +435,7 @@ function builtIns(program: Command, runtime: Runtime): void {
       'Show whether a newer agentrail-cli exists, and how to install it.',
     )
     .action(async (_options: unknown, self: Command) => {
-      let found;
-      try {
-        found = await newestVersion(runtime);
-      } catch (error) {
-        throw new CliError(
-          EXIT.unavailable,
-          'Could not reach the npm registry.',
-          {
-            cause: error,
-          },
-        );
-      }
+      const found = await newestVersion(runtime, UPDATE_TIMEOUT_MS);
       const upToDate =
         found.newest === undefined || !isNewer(found.newest, found.installed);
       printData(runtime, outputMode(runtime, globalsOf(self).json === true), {
@@ -419,7 +446,7 @@ function builtIns(program: Command, runtime: Runtime): void {
         runtime,
         upToDate
           ? `agentrail-cli ${found.installed} is the newest on ${found.channel}.`
-          : `Update to ${String(found.newest)}: ${found.upgrade}`,
+          : `Update to ${found.newest}: ${found.upgrade}`,
       );
     });
 
@@ -448,7 +475,7 @@ function builtIns(program: Command, runtime: Runtime): void {
         self: Command,
       ) => {
         const environment = environmentOf(self);
-        const steps = await setUpAgents(runtime, environment, {
+        const { steps, failure } = await setUpAgents(runtime, environment, {
           only: agentsFrom(options.only),
           project: options.project === true,
           readOnly: options.readOnly === true,
@@ -458,6 +485,7 @@ function builtIns(program: Command, runtime: Runtime): void {
           outputMode(runtime, globalsOf(self).json === true),
           steps,
         );
+        if (failure) throw failure;
         if (steps.every((step) => step.status === 'skipped')) {
           say(
             runtime,
@@ -471,7 +499,7 @@ function builtIns(program: Command, runtime: Runtime): void {
     .command('unlink')
     .description('Stop using the workspace linked to this directory.')
     .action(async () => {
-      const found = await findLink(runtime.cwd);
+      const found = await findLinkFile(runtime.cwd);
       if (!found) {
         say(runtime, 'No workspace is linked here.');
         return;
@@ -513,9 +541,13 @@ export async function run(
   runtime: Runtime,
   argv: readonly string[],
 ): Promise<ExitCode> {
-  // Asked alongside the command, so it never adds a request's wait; its
-  // notice goes to stderr once the command is done.
-  const notice = updateNotice(runtime, argv);
+  // Asked alongside the command, so it adds no wait unless the command ends
+  // first, and then at most the check's 2 s, once a day. Its notice goes to
+  // stderr once the command is done. A failure it does not know is shown in
+  // full, but the command's exit code stays the command's.
+  const notice = updateNotice(runtime, argv).catch(
+    (error: unknown) => `The update check failed:\n${inspect(error)}`,
+  );
   try {
     const program = baseProgram(runtime);
     builtIns(program, runtime);
@@ -535,7 +567,13 @@ export async function run(
       say(runtime, error.message);
       return error.exitCode;
     }
-    throw error;
+    // A failure the CLI does not know: shown in full, with a code no script
+    // reads as Agentrail's answer.
+    say(
+      runtime,
+      `agentrail-cli failed unexpectedly. Please report it at ${ISSUES_URL}:\n${inspect(error)}`,
+    );
+    return EXIT.unexpected;
   } finally {
     const text = await notice;
     if (text !== undefined) say(runtime, text);

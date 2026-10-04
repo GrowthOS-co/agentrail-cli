@@ -5,7 +5,11 @@ import {
   startFakeAgentrail,
   type FakeAgentrail,
 } from './support/fake-agentrail.js';
-import { memoryKeychain, testRuntime } from './support/test-runtime.js';
+import {
+  lockedKeychain,
+  memoryKeychain,
+  testRuntime,
+} from './support/test-runtime.js';
 
 let agentrail: FakeAgentrail;
 beforeEach(async () => {
@@ -76,5 +80,73 @@ describe('agentrail login', () => {
       email: null,
     });
     expect(keychain.entries.has('dev')).toBe(true);
+  });
+
+  // The keychain's refusal tells the agent to sign in with
+  // --insecure-storage, so that must finish the sign-in. A code exchanged
+  // once is spent: resuming it again only fails until it expires.
+  it('finishes in a file when the keychain cannot keep the sign-in, and never resumes a spent code', async () => {
+    const cli = await testRuntime({
+      mcpUrl: agentrail.mcpUrl,
+      keychain: lockedKeychain(),
+    });
+    const login = async (...flags: string[]) => {
+      const each = await testRuntime({
+        mcpUrl: agentrail.mcpUrl,
+        keychain: lockedKeychain(),
+      });
+      const exitCode = await run(
+        { ...each.runtime, configDir: cli.configDir },
+        ['--env', 'dev', 'login', ...flags],
+      );
+      return { exitCode, stdout: each.stdout(), stderr: each.stderr() };
+    };
+
+    expect((await login()).exitCode).toBe(0);
+    agentrail.deviceAnswers.push('tokens');
+    const notKept = await login();
+    expect(notKept.exitCode).toBe(2);
+    expect(notKept.stderr).toContain(
+      'agentrail login --insecure-storage --env dev',
+    );
+
+    const restarted = await login('--insecure-storage');
+    expect(restarted.exitCode).toBe(0);
+    expect(JSON.parse(restarted.stdout)).toMatchObject({
+      status: 'pending',
+      next: 'agentrail login --insecure-storage --env dev',
+    });
+    expect(agentrail.deviceRequests).toHaveLength(2);
+
+    agentrail.deviceAnswers.push('tokens');
+    expect((await login('--insecure-storage')).exitCode).toBe(0);
+
+    expect((await login()).exitCode).toBe(0);
+    agentrail.deviceAnswers.push('tokens');
+    expect(await login('--insecure-storage')).toMatchObject({
+      exitCode: 0,
+      stdout: expect.stringContaining('signed_in') as string,
+    });
+  });
+
+  // An OAuth error the flow does not expect leaves a code that signs no one
+  // in: the next run must start over, not poll it again.
+  it('starts over after an unexpected sign-in error', async () => {
+    const keychain = memoryKeychain();
+    const first = await testRuntime({ mcpUrl: agentrail.mcpUrl, keychain });
+    expect(await run(first.runtime, ['--env', 'dev', 'login'])).toBe(0);
+
+    agentrail.deviceAnswers.push({ error: 'invalid_grant' });
+    const second = await testRuntime({ mcpUrl: agentrail.mcpUrl, keychain });
+    const resumed = { ...second.runtime, configDir: first.configDir };
+    expect(await run(resumed, ['--env', 'dev', 'login'])).toBe(3);
+    expect(second.stderr()).toContain(
+      'Signing in failed (invalid_grant). Run agentrail login --env dev again.',
+    );
+
+    const third = await testRuntime({ mcpUrl: agentrail.mcpUrl, keychain });
+    const again = { ...third.runtime, configDir: first.configDir };
+    expect(await run(again, ['--env', 'dev', 'login'])).toBe(0);
+    expect(JSON.parse(third.stdout())).toMatchObject({ status: 'pending' });
   });
 });

@@ -1,10 +1,10 @@
-import { cp, mkdir, rm, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { cp, rm } from 'node:fs/promises';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { clientIdOf, type Environment } from './environments.js';
 import { CliError, EXIT } from './errors.js';
-import { readJson } from './files.js';
+import { isSystemError, readJson, writePrivateJson } from './files.js';
 import type { Runtime } from './runtime.js';
 
 export const AGENTS = ['claude', 'codex', 'cursor'] as const;
@@ -21,7 +21,7 @@ export interface SetupOptions {
 export interface SetupStep {
   readonly agent: AgentName;
   readonly part: 'skill' | 'mcp';
-  readonly status: 'installed' | 'already set up' | 'skipped';
+  readonly status: 'installed' | 'already set up' | 'skipped' | 'failed';
   readonly detail: string;
 }
 
@@ -156,6 +156,38 @@ async function addCodexServer(
   };
 }
 
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** Cursor's mcp.json, or an empty one; one it cannot change is named. */
+async function cursorConfig(path: string): Promise<Record<string, unknown>> {
+  const unusable = (problem: string, cause?: unknown) =>
+    new CliError(
+      EXIT.usage,
+      `${path} ${problem}, so Cursor was not set up. Fix it, then run agentrail agent setup again.`,
+      { cause },
+    );
+  let value: unknown;
+  try {
+    value = await readJson(path);
+  } catch (error) {
+    // Its text is never shown: other servers' entries can hold keys.
+    if (error instanceof SyntaxError)
+      throw unusable('is not valid JSON', error);
+    if (isSystemError(error)) {
+      throw unusable(`could not be read (${error.code ?? ''})`, error);
+    }
+    throw error;
+  }
+  if (value === undefined) return {};
+  if (!isObject(value)) throw unusable('is not a JSON object');
+  if (value.mcpServers !== undefined && !isObject(value.mcpServers)) {
+    throw unusable('has an mcpServers that is not a JSON object');
+  }
+  return value;
+}
+
 /** Adds the server to Cursor's mcp.json, keeping every server already there. */
 async function addCursorServer(
   runtime: Runtime,
@@ -168,10 +200,10 @@ async function addCursorServer(
     '.cursor',
     'mcp.json',
   );
-  const config = ((await readJson(path)) ?? {}) as {
-    mcpServers?: Record<string, unknown>;
-  };
-  if (config.mcpServers?.[name] !== undefined) {
+  const config = await cursorConfig(path);
+  const servers = (config.mcpServers ?? {}) as Record<string, unknown>;
+  const existing = servers[name];
+  if (isObject(existing) && existing.url === url) {
     return {
       agent: 'cursor',
       part: 'mcp',
@@ -179,34 +211,45 @@ async function addCursorServer(
       detail: name,
     };
   }
-  const updated = {
-    ...config,
-    mcpServers: { ...config.mcpServers, [name]: { url } },
-  };
-  await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, `${JSON.stringify(updated, null, 2)}\n`);
+  // Written whole, so Cursor never reads half of it, and readable only by
+  // you, as other servers' entries can hold keys.
+  try {
+    await writePrivateJson(path, {
+      ...config,
+      mcpServers: { ...servers, [name]: { url } },
+    });
+  } catch (error) {
+    if (!isSystemError(error)) throw error;
+    throw new CliError(
+      EXIT.usage,
+      `${path} could not be written (${error.code ?? ''}), so Cursor was not set up. Fix it, then run agentrail agent setup again.`,
+      { cause: error },
+    );
+  }
   return {
     agent: 'cursor',
     part: 'mcp',
     status: 'installed',
-    detail: `${name}: Cursor asks you to sign in the first time it uses it.`,
+    detail: `${name}${existing === undefined ? '' : ` now at ${url}`}: Cursor asks you to sign in the first time it uses it.`,
   };
 }
 
 /**
  * Installs the Agentrail skill and MCP server into each coding agent on this
  * machine (CLI-009). Each agent signs in to the MCP server itself; the CLI's
- * own sign-in is never handed to it.
+ * own sign-in is never handed to it. An agent that cannot be set up is a
+ * failed step, and the others are still set up; `failure` is the first.
  */
 export async function setUpAgents(
   runtime: Runtime,
   environment: Environment,
   options: SetupOptions,
-): Promise<SetupStep[]> {
+): Promise<{ steps: SetupStep[]; failure: CliError | undefined }> {
   clientIdOf(environment);
   const name = serverName(environment, options.readOnly);
   const url = serverUrl(environment, options.readOnly);
   const steps: SetupStep[] = [];
+  let failure: CliError | undefined;
   const skillsDone = new Set<string>();
   for (const agent of options.only ?? AGENTS) {
     if (!(await installed(runtime, agent))) {
@@ -222,19 +265,34 @@ export async function setUpAgents(
       skillsDone.add(skill);
     }
     steps.push({ agent, part: 'skill', status: 'installed', detail: skill });
-    switch (agent) {
-      case 'claude':
-        steps.push(await addClaudeServer(runtime, name, url, options.project));
-        break;
-      case 'codex':
-        steps.push(await addCodexServer(runtime, name, url, options.project));
-        break;
-      case 'cursor':
-        steps.push(await addCursorServer(runtime, name, url, options.project));
-        break;
+    try {
+      switch (agent) {
+        case 'claude':
+          steps.push(
+            await addClaudeServer(runtime, name, url, options.project),
+          );
+          break;
+        case 'codex':
+          steps.push(await addCodexServer(runtime, name, url, options.project));
+          break;
+        case 'cursor':
+          steps.push(
+            await addCursorServer(runtime, name, url, options.project),
+          );
+          break;
+      }
+    } catch (error) {
+      if (!(error instanceof CliError)) throw error;
+      steps.push({
+        agent,
+        part: 'mcp',
+        status: 'failed',
+        detail: error.message,
+      });
+      failure ??= error;
     }
   }
-  return steps;
+  return { steps, failure };
 }
 
 /** `--only claude,cursor`, checked against the agents setup knows. */

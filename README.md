@@ -47,18 +47,22 @@ just `agentrail`: it belongs to someone else.
   it. Commands check npm at most once a day and say so on stderr;
   `--no-update-check` or `AGENTRAIL_NO_UPDATE_CHECK=1` turns that off.
 - **Credentials** are kept in the OS keychain. `login --insecure-storage`
-  keeps them in a file only you can read instead. A token in
-  `AGENTRAIL_TOKEN` is used as given and never stored.
+  keeps them in a file only you can read instead; where the keychain cannot
+  keep a sign-in, the CLI says so and never falls back to a file on its own.
+  `logout` removes the sign-in from both places. A token in
+  `AGENTRAIL_TOKEN` is used as given, wins over a stored sign-in, and is
+  never stored.
 
 ## Exit codes
 
-| Code | Meaning                                                                           |
-| ---- | --------------------------------------------------------------------------------- |
-| 0    | Done                                                                              |
-| 1    | Agentrail refused: not found, not allowed, or invalid input                       |
-| 2    | The command line is wrong, or this CLI is too old: the message says how to update |
-| 3    | Not signed in, or the sign-in expired: run `agentrail login`                      |
-| 4    | Agentrail or the network could not be reached                                     |
+| Code | Meaning                                                                                                      |
+| ---- | ------------------------------------------------------------------------------------------------------------ |
+| 0    | Done                                                                                                         |
+| 1    | Agentrail refused: not found, not allowed, or invalid input                                                  |
+| 2    | The command line, or a file of yours it reads, is wrong; or this CLI is too old: the message says what to do |
+| 3    | Not signed in, or the sign-in expired: run `agentrail login`                                                 |
+| 4    | Agentrail, the npm registry or the network could not be reached                                              |
+| 5    | The CLI failed in a way it does not know: the message shows the failure in full; please report it            |
 
 ## Releasing
 

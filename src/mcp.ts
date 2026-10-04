@@ -8,7 +8,7 @@ import {
 
 import { commandFor } from './credentials.js';
 import { clientIdOf, type Environment } from './environments.js';
-import { CliError, EXIT } from './errors.js';
+import { causeOf, CliError, EXIT } from './errors.js';
 import type { Runtime } from './runtime.js';
 import { accessToken } from './session.js';
 import { VERSION } from './version.js';
@@ -62,13 +62,50 @@ function textOf(content: unknown): string {
  */
 const OUTDATED_CLI = -32000;
 
+/**
+ * What Agentrail said when it refused a request: the `message` of its JSON
+ * error body (`{ code, message, requestId }`), else the body as it came.
+ */
+function refusalOf(error: SdkHttpError): string {
+  const text = typeof error.data.text === 'string' ? error.data.text : '';
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch (parseError) {
+    if (parseError instanceof SyntaxError) return text.trim();
+    throw parseError;
+  }
+  const { code, message } = (body ?? {}) as {
+    code?: unknown;
+    message?: unknown;
+  };
+  if (typeof message !== 'string') return text.trim();
+  return typeof code === 'string' ? `${message} (${code}).` : `${message}.`;
+}
+
 /** What a failure talking to the server means for the person running us. */
-function asCliError(error: unknown, environment: Environment): unknown {
+function asCliError(
+  error: unknown,
+  runtime: Runtime,
+  environment: Environment,
+): unknown {
   if (error instanceof CliError) return error;
   if (error instanceof SdkHttpError && error.status === 401) {
     return new CliError(
       EXIT.signIn,
-      `Agentrail ${environment.name} did not accept your sign-in. Run ${commandFor(environment, 'login')}.`,
+      runtime.env.AGENTRAIL_TOKEN
+        ? `Agentrail ${environment.name} did not accept the token in AGENTRAIL_TOKEN. Replace it, or unset it to use your own sign-in (${commandFor(environment, 'login')}).`
+        : `Agentrail ${environment.name} did not accept your sign-in. Run ${commandFor(environment, 'login')}.`,
+      { cause: error },
+    );
+  }
+  // An answer about you, not the server: agent access turned off for your
+  // organization, or an organization you no longer belong to.
+  if (error instanceof SdkHttpError && error.status === 403) {
+    const refusal = refusalOf(error);
+    return new CliError(
+      EXIT.refused,
+      `Agentrail ${environment.name} refused: ${refusal === '' ? 'HTTP 403.' : refusal}`,
       { cause: error },
     );
   }
@@ -85,7 +122,7 @@ function asCliError(error: unknown, environment: Environment): unknown {
   if (error instanceof SdkError || error instanceof TypeError) {
     return new CliError(
       EXIT.unavailable,
-      `Could not use Agentrail ${environment.name} at ${environment.mcpUrl}: ${error.message}`,
+      `Could not use Agentrail ${environment.name} at ${environment.mcpUrl} (${causeOf(error)}).`,
       { cause: error },
     );
   }
@@ -148,7 +185,7 @@ export async function withServer<T>(
     await client.connect(transport);
     return await use(connection);
   } catch (error) {
-    throw asCliError(error, environment);
+    throw asCliError(error, runtime, environment);
   } finally {
     await client.close();
   }

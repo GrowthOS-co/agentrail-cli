@@ -49,6 +49,14 @@ function pendingPath(runtime: Runtime, environment: EnvironmentName): string {
   return join(runtime.configDir, 'pending-login', `${environment}.json`);
 }
 
+/** The command that signs in again, keeping where the sign-in is kept. */
+export function loginCommand(environment: Environment, storage: Storage) {
+  return commandFor(
+    environment,
+    storage === 'file' ? 'login --insecure-storage' : 'login',
+  );
+}
+
 /** Asks the environment's authorization server for a device code. */
 export async function startDeviceLogin(
   runtime: Runtime,
@@ -107,7 +115,17 @@ export async function pendingLogin(
   environment: Environment,
 ): Promise<PendingLogin | undefined> {
   const path = pendingPath(runtime, environment.name);
-  const pending = (await readJson(path)) as PendingLogin | undefined;
+  let pending: PendingLogin | undefined;
+  try {
+    pending = (await readJson(path)) as PendingLogin | undefined;
+  } catch (error) {
+    // The CLI's own file, cut short: a new sign-in replaces it.
+    if (error instanceof SyntaxError) {
+      await removeFile(path);
+      return undefined;
+    }
+    throw error;
+  }
   if (pending === undefined) return undefined;
   if (new Date(pending.expiresAt) <= runtime.now()) {
     await removeFile(path);
@@ -126,7 +144,7 @@ export async function completeDeviceLogin(
   pending: PendingLogin,
 ): Promise<Credential> {
   const path = pendingPath(runtime, environment.name);
-  const retry = commandFor(environment, 'login');
+  const retry = loginCommand(environment, pending.storage);
   let interval = pending.intervalSeconds;
   for (;;) {
     await runtime.sleep(interval * 1_000);
@@ -143,14 +161,16 @@ export async function completeDeviceLogin(
       client_id: pending.clientId,
     });
     if (answer.kind === 'tokens') {
+      // The device code is spent once it has been exchanged: a sign-in that
+      // fails to be kept starts again rather than resuming it.
+      await removeFile(path);
       const credential = credentialFrom(runtime, answer, {
         environment: environment.name,
         tokenEndpoint: pending.tokenEndpoint,
         clientId: pending.clientId,
         resource: pending.resource,
       });
-      await saveCredential(runtime, credential, pending.storage);
-      await removeFile(path);
+      await saveCredential(runtime, environment, credential, pending.storage);
       return credential;
     }
     switch (answer.error) {
@@ -172,9 +192,12 @@ export async function completeDeviceLogin(
           `The sign-in code expired. Run ${retry} again.`,
         );
       default:
+        // Any other OAuth error (RFC 6749 §5.2) means this code will not
+        // sign anyone in.
+        await removeFile(path);
         throw new CliError(
-          EXIT.unavailable,
-          `Signing in failed: ${answer.error}.`,
+          EXIT.signIn,
+          `Signing in failed (${answer.error}). Run ${retry} again.`,
         );
     }
   }
