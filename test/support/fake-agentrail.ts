@@ -20,6 +20,10 @@ export interface FakeAgentrail {
   readonly toolCalls: { name: string; input: Record<string, unknown> }[];
   /** What the next device-code polls are answered with, in order. */
   readonly deviceAnswers: DeviceAnswer[];
+  /** The user agent of every MCP request, in order. */
+  readonly userAgents: (string | undefined)[];
+  /** When set, tool requests are refused as from an outdated CLI. */
+  refuseOutdatedCli: boolean;
   /** Access tokens the MCP server accepts, and refresh tokens still good. */
   readonly accessTokens: Set<string>;
   readonly refreshTokens: Set<string>;
@@ -115,6 +119,8 @@ export async function startFakeAgentrail(): Promise<FakeAgentrail> {
     tokenRequests: [] as URLSearchParams[],
     toolCalls: [] as FakeAgentrail['toolCalls'],
     deviceAnswers: [] as DeviceAnswer[],
+    userAgents: [] as (string | undefined)[],
+    refuseOutdatedCli: false,
     accessTokens: new Set<string>(),
     refreshTokens: new Set<string>(),
   };
@@ -188,7 +194,27 @@ export async function startFakeAgentrail(): Promise<FakeAgentrail> {
           json(401, { error: 'invalid_token' });
           return;
         }
+        fake.userAgents.push(request.headers['user-agent']);
         const body = await bodyOf(request);
+        const message = body
+          ? (JSON.parse(body) as { id?: unknown; method?: unknown })
+          : {};
+        if (
+          fake.refuseOutdatedCli &&
+          typeof message.method === 'string' &&
+          message.method.startsWith('tools/')
+        ) {
+          json(200, {
+            jsonrpc: '2.0',
+            id: message.id,
+            error: {
+              code: -32000,
+              message:
+                'agentrail-cli 0.0.1 is older than 0.1.0, the oldest version Agentrail accepts. Update it: npm install -g agentrail-cli@latest',
+            },
+          });
+          return;
+        }
         const headers = new Headers();
         for (const [name, value] of Object.entries(request.headers)) {
           if (typeof value === 'string') headers.set(name, value);
@@ -212,15 +238,15 @@ export async function startFakeAgentrail(): Promise<FakeAgentrail> {
     http.listen(0, '127.0.0.1', resolve);
   });
   const { port } = http.address() as AddressInfo;
-  return {
-    ...fake,
+  // The same object the server reads, so a test's later settings take effect.
+  return Object.assign(fake, {
     mcpUrl: `http://127.0.0.1:${String(port)}/mcp`,
     close: () =>
-      new Promise((resolve) => {
+      new Promise<void>((resolve) => {
         http.closeAllConnections();
         http.close(() => {
           resolve();
         });
       }),
-  };
+  });
 }

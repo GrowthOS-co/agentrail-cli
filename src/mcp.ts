@@ -56,6 +56,12 @@ function textOf(content: unknown): string {
     : '';
 }
 
+/**
+ * The server's answer to a CLI older than the oldest it serves (CLI-008). Its
+ * message names the command that updates the CLI.
+ */
+const OUTDATED_CLI = -32000;
+
 /** What a failure talking to the server means for the person running us. */
 function asCliError(error: unknown, environment: Environment): unknown {
   if (error instanceof CliError) return error;
@@ -65,6 +71,9 @@ function asCliError(error: unknown, environment: Environment): unknown {
       `Agentrail ${environment.name} did not accept your sign-in. Run ${commandFor(environment, 'login')}.`,
       { cause: error },
     );
+  }
+  if (error instanceof ProtocolError && error.code === OUTDATED_CLI) {
+    return new CliError(EXIT.usage, error.message, { cause: error });
   }
   if (error instanceof ProtocolError) {
     return new CliError(
@@ -100,7 +109,13 @@ export async function withServer<T>(
   const transport = new StreamableHTTPClientTransport(
     new URL(environment.mcpUrl),
     {
-      requestInit: { headers: { authorization: `Bearer ${token}` } },
+      requestInit: {
+        headers: {
+          authorization: `Bearer ${token}`,
+          // How the server knows a CLI too old to serve (CLI-008).
+          'user-agent': `agentrail-cli/${VERSION}`,
+        },
+      },
       fetch: runtime.fetch,
     },
   );
