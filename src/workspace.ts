@@ -1,6 +1,11 @@
 import { dirname, join } from 'node:path';
 
-import type { Environment, EnvironmentName } from './environments.js';
+import {
+  ENVIRONMENT_NAMES,
+  type Environment,
+  type EnvironmentName,
+} from './environments.js';
+import { CliError, EXIT } from './errors.js';
 import { readJson, removeFile, writePrivateJson } from './files.js';
 import type { Runtime } from './runtime.js';
 
@@ -13,16 +18,50 @@ export interface Link {
 
 const LINK_FILE = join('.agentrail', 'link.json');
 
-/** The nearest link file at or above a directory. */
+function isLink(value: unknown): value is Link {
+  if (typeof value !== 'object' || value === null) return false;
+  const record = value as Record<string, unknown>;
+  return (
+    (ENVIRONMENT_NAMES as readonly unknown[]).includes(record.environment) &&
+    typeof record.workspaceId === 'string' &&
+    typeof record.workspaceName === 'string'
+  );
+}
+
+/**
+ * The nearest link file at or above a directory, read or not: `unlink` must
+ * be able to remove one cut short or edited by hand.
+ */
+export async function findLinkFile(
+  from: string,
+): Promise<{ path: string; value: unknown } | undefined> {
+  for (let directory = from; ; directory = dirname(directory)) {
+    const path = join(directory, LINK_FILE);
+    try {
+      const value = await readJson(path);
+      if (value !== undefined) return { path, value };
+    } catch (error) {
+      // There, but not JSON: no value read from it.
+      if (error instanceof SyntaxError) return { path, value: undefined };
+      throw error;
+    }
+    if (dirname(directory) === directory) return undefined;
+  }
+}
+
+/** The nearest link at or above a directory; one this CLI cannot read is named. */
 export async function findLink(
   from: string,
 ): Promise<{ link: Link; path: string } | undefined> {
-  for (let directory = from; ; directory = dirname(directory)) {
-    const path = join(directory, LINK_FILE);
-    const link = (await readJson(path)) as Link | undefined;
-    if (link) return { link, path };
-    if (dirname(directory) === directory) return undefined;
+  const found = await findLinkFile(from);
+  if (found === undefined) return undefined;
+  if (!isLink(found.value)) {
+    throw new CliError(
+      EXIT.usage,
+      `${found.path} is not a link this CLI wrote. Run agentrail unlink to remove it, or agentrail link <workspaceId> to replace it.`,
+    );
   }
+  return { link: found.value, path: found.path };
 }
 
 export async function writeLink(cwd: string, link: Link): Promise<string> {

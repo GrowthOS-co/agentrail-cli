@@ -1,6 +1,7 @@
 import type { Credential } from './credentials.js';
 import type { EnvironmentName } from './environments.js';
 import { CliError, EXIT } from './errors.js';
+import { jsonObjectOf, send } from './http.js';
 import type { Runtime } from './runtime.js';
 
 /** A token endpoint's answer (RFC 6749 §5), success or error. */
@@ -14,32 +15,24 @@ export type TokenAnswer =
     }
   | { readonly kind: 'error'; readonly error: string };
 
-/** POSTs a form to an OAuth endpoint and returns the parsed JSON body. */
+/**
+ * POSTs a form to an OAuth endpoint and returns its JSON object. OAuth errors
+ * come back as JSON too (RFC 6749 §5.2); any other answer is exit code 4.
+ */
 export async function postForm(
   runtime: Runtime,
   url: string,
   form: Record<string, string>,
 ): Promise<{ status: number; body: Record<string, unknown> }> {
-  let response: Response;
-  try {
-    response = await runtime.fetch(url, {
-      method: 'POST',
-      headers: {
-        accept: 'application/json',
-        'content-type': 'application/x-www-form-urlencoded',
-      },
-      body: new URLSearchParams(form).toString(),
-    });
-  } catch (error) {
-    throw new CliError(EXIT.unavailable, `Could not reach ${url}.`, {
-      cause: error,
-    });
-  }
-  const body = await response.json();
-  if (typeof body !== 'object' || body === null) {
-    throw new CliError(EXIT.unavailable, `${url} answered without JSON.`);
-  }
-  return { status: response.status, body: body as Record<string, unknown> };
+  const answer = await send(runtime, url, {
+    method: 'POST',
+    headers: {
+      accept: 'application/json',
+      'content-type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams(form).toString(),
+  });
+  return { status: answer.status, body: jsonObjectOf(url, answer) };
 }
 
 export async function requestTokens(

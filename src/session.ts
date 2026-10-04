@@ -46,6 +46,18 @@ export async function accessToken(
     resource: credential.resource,
   });
   if (answer.kind === 'error') {
+    // Another command refreshed first: WorkOS accepts each refresh token
+    // once, so this one is spent, and the sign-in that command stored is
+    // fresh.
+    if (answer.error === 'invalid_grant') {
+      const now = await loadCredential(runtime, environment);
+      if (
+        now !== undefined &&
+        now.credential.refreshToken !== credential.refreshToken
+      ) {
+        return now.credential.accessToken;
+      }
+    }
     throw new CliError(
       EXIT.signIn,
       `Your sign-in to ${environment.name} expired (${answer.error}). Run ${login}.`,
@@ -64,6 +76,6 @@ export async function accessToken(
     resource: credential.resource,
     email: credential.email,
   });
-  await saveCredential(runtime, refreshed, storage);
+  await saveCredential(runtime, environment, refreshed, storage);
   return refreshed.accessToken;
 }

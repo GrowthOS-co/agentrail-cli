@@ -112,13 +112,17 @@ export async function diagnose(
     });
   }
 
-  const link = await findLink(runtime.cwd);
-  checks.push({
-    check: 'Workspace link',
-    status: 'note',
-    detail: link
-      ? `${link.link.workspaceName} (${link.link.environment}), from ${link.path}`
-      : 'none: commands use your default workspace',
-  });
+  try {
+    const link = await findLink(runtime.cwd);
+    checks.push({
+      check: 'Workspace link',
+      status: 'note',
+      detail: link
+        ? `${link.link.workspaceName} (${link.link.environment}), from ${link.path}`
+        : 'none: commands use your default workspace',
+    });
+  } catch (error) {
+    fail('Workspace link', error);
+  }
   return { checks, exitCode };
 }

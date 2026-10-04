@@ -3,7 +3,7 @@ import { join, resolve } from 'node:path';
 
 import type { Environment } from './environments.js';
 import { CliError, EXIT } from './errors.js';
-import { readJson, writePrivateJson } from './files.js';
+import { isSystemError, readJson, writePrivateJson } from './files.js';
 import type { CatalogTool, PropertySchema } from './mcp.js';
 import { withServer } from './mcp.js';
 import type { Runtime } from './runtime.js';
@@ -30,12 +30,22 @@ function cachePath(runtime: Runtime, environment: Environment): string {
   return join(runtime.configDir, 'catalog', `${environment.name}.json`);
 }
 
+/** The kept catalog. One cut short or of another shape counts as none. */
 async function cachedCatalog(
   runtime: Runtime,
   environment: Environment,
 ): Promise<CachedCatalog | undefined> {
-  return (await readJson(cachePath(runtime, environment))) as
-    CachedCatalog | undefined;
+  let value: unknown;
+  try {
+    value = await readJson(cachePath(runtime, environment));
+  } catch (error) {
+    if (error instanceof SyntaxError) return undefined;
+    throw error;
+  }
+  const cache = value as Partial<CachedCatalog> | null | undefined;
+  return typeof cache?.fetchedAt === 'string' && Array.isArray(cache.tools)
+    ? (cache as CachedCatalog)
+    : undefined;
 }
 
 /** The catalog from the server, kept for the next command. */
@@ -170,7 +180,7 @@ export async function inputOf(
   let input: Record<string, unknown> = {};
   if (typeof options.inputFile === 'string') {
     input = parseObject(
-      await readFile(resolve(cwd, options.inputFile), 'utf8'),
+      await inputFile(resolve(cwd, options.inputFile)),
       '--input-file',
     );
   }
@@ -202,6 +212,24 @@ export async function inputOf(
     );
   }
   return input;
+}
+
+async function inputFile(path: string): Promise<string> {
+  try {
+    return await readFile(path, 'utf8');
+  } catch (error) {
+    if (
+      isSystemError(error) &&
+      ['ENOENT', 'EISDIR', 'EACCES'].includes(error.code ?? '')
+    ) {
+      throw new CliError(
+        EXIT.usage,
+        `--input-file: cannot read ${path} (${error.code ?? ''}).`,
+        { cause: error },
+      );
+    }
+    throw error;
+  }
 }
 
 function parseObject(text: string, source: string): Record<string, unknown> {

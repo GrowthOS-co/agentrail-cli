@@ -129,4 +129,46 @@ describe('agentrail agent setup', () => {
       detail: 'not installed',
     });
   });
+
+  // Claude Code and Codex are changed before Cursor's file is read: a file
+  // it cannot use must not hide what was already done, nor be overwritten.
+  // An entry under the server's name that points elsewhere is not set up.
+  it('reports what it set up when Cursor’s file cannot be used, and fixes an entry pointing elsewhere', async () => {
+    const cli = await testRuntime({
+      mcpUrl: MCP_URL,
+      commands: { claude: agentCli(), 'cursor-agent': agentCli() },
+    });
+    const cursorConfig = join(cli.runtime.homeDir, '.cursor', 'mcp.json');
+    await mkdir(join(cli.runtime.homeDir, '.cursor'), { recursive: true });
+    const damaged = '{ "mcpServers": { // a comment\n } }';
+    await writeFile(cursorConfig, damaged);
+
+    expect(await run(cli.runtime, ['--env', 'dev', 'agent', 'setup'])).toBe(2);
+    expect(JSON.parse(cli.stdout())).toContainEqual({
+      agent: 'claude',
+      part: 'mcp',
+      status: 'installed',
+      detail: 'agentrail-dev: run /mcp in Claude Code to sign in.',
+    });
+    expect(cli.stderr()).toContain(`${cursorConfig} is not valid JSON`);
+    expect(await readFile(cursorConfig, 'utf8')).toBe(damaged);
+
+    await writeFile(
+      cursorConfig,
+      JSON.stringify({ mcpServers: { 'agentrail-dev': null } }),
+    );
+    expect(
+      await run(cli.runtime, [
+        '--env',
+        'dev',
+        'agent',
+        'setup',
+        '--only',
+        'cursor',
+      ]),
+    ).toBe(0);
+    expect(JSON.parse(await readFile(cursorConfig, 'utf8'))).toEqual({
+      mcpServers: { 'agentrail-dev': { url: MCP_URL } },
+    });
+  });
 });

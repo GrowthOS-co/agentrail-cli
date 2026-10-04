@@ -24,6 +24,8 @@ export interface FakeAgentrail {
   readonly userAgents: (string | undefined)[];
   /** When set, tool requests are refused as from an outdated CLI. */
   refuseOutdatedCli: boolean;
+  /** When set, MCP requests are refused with 403 and Agentrail's error body. */
+  forbidden: { code: string; message: string } | undefined;
   /** Access tokens the MCP server accepts, and refresh tokens still good. */
   readonly accessTokens: Set<string>;
   readonly refreshTokens: Set<string>;
@@ -121,6 +123,7 @@ export async function startFakeAgentrail(): Promise<FakeAgentrail> {
     deviceAnswers: [] as DeviceAnswer[],
     userAgents: [] as (string | undefined)[],
     refuseOutdatedCli: false,
+    forbidden: undefined as FakeAgentrail['forbidden'],
     accessTokens: new Set<string>(),
     refreshTokens: new Set<string>(),
   };
@@ -192,6 +195,10 @@ export async function startFakeAgentrail(): Promise<FakeAgentrail> {
         )?.[1];
         if (token === undefined || !fake.accessTokens.has(token)) {
           json(401, { error: 'invalid_token' });
+          return;
+        }
+        if (fake.forbidden) {
+          json(403, { ...fake.forbidden, requestId: 'req-1' });
           return;
         }
         fake.userAgents.push(request.headers['user-agent']);

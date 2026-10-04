@@ -1,4 +1,5 @@
 import { CliError, EXIT } from './errors.js';
+import { jsonObjectOf, send } from './http.js';
 import type { Runtime } from './runtime.js';
 
 /** Where an environment's MCP server says to sign in, and its endpoints. */
@@ -8,26 +9,24 @@ export interface SignInEndpoints {
   readonly tokenEndpoint: string;
 }
 
-async function getJson(runtime: Runtime, url: string): Promise<unknown> {
-  let response: Response;
-  try {
-    response = await runtime.fetch(url, {
-      headers: { accept: 'application/json' },
-    });
-  } catch (error) {
-    throw new CliError(EXIT.unavailable, `Could not reach ${url}.`, {
-      cause: error,
-    });
+async function getJson(
+  runtime: Runtime,
+  url: string,
+): Promise<Record<string, unknown>> {
+  const answer = await send(runtime, url, {
+    headers: { accept: 'application/json' },
+  });
+  if (!answer.ok) {
+    throw new CliError(EXIT.unavailable, `${url} answered ${answer.status}.`);
   }
-  if (!response.ok) {
-    throw new CliError(EXIT.unavailable, `${url} answered ${response.status}.`);
-  }
-  return response.json();
+  return jsonObjectOf(url, answer);
 }
 
-function stringField(value: unknown, key: string): string | undefined {
-  if (typeof value !== 'object' || value === null) return undefined;
-  const field = (value as Record<string, unknown>)[key];
+function stringField(
+  value: Record<string, unknown>,
+  key: string,
+): string | undefined {
+  const field = value[key];
   return typeof field === 'string' ? field : undefined;
 }
 
@@ -47,8 +46,7 @@ export async function discoverSignIn(
   ).href;
   const resourceMetadata = await getJson(runtime, metadataUrl);
   const resource = stringField(resourceMetadata, 'resource');
-  const servers = (resourceMetadata as { authorization_servers?: unknown })
-    .authorization_servers;
+  const servers = resourceMetadata.authorization_servers;
   const authorizationServer = Array.isArray(servers)
     ? (servers as unknown[])[0]
     : undefined;

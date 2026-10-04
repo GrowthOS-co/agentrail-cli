@@ -8,7 +8,10 @@ import { Entry } from '@napi-rs/keyring';
 
 import { ENVIRONMENTS, type Environments } from './environments.js';
 
-/** The OS keychain, by account name; absent where the platform has none. */
+/**
+ * The OS keychain, by account name. Each call throws where it cannot be used:
+ * no keychain on this system, or one that is locked.
+ */
 export interface Keychain {
   get(account: string): string | null;
   set(account: string, secret: string): void;
@@ -45,7 +48,7 @@ export interface Runtime {
   readonly stderr: Stream;
   readonly stdinIsTTY: boolean;
   readonly fetch: typeof fetch;
-  readonly keychain: Keychain | undefined;
+  readonly keychain: Keychain;
   readonly now: () => Date;
   readonly sleep: (milliseconds: number) => Promise<void>;
   readonly openBrowser: (url: string) => void;
@@ -76,14 +79,39 @@ function configDirOf(env: Readonly<Record<string, string | undefined>>) {
   return join(base, 'agentrail');
 }
 
+/**
+ * Whether a URL is a web page a browser may be asked to open: https, or http
+ * on this computer. The URL comes from the authorization server, so a file,
+ * or a scheme that starts another program, is never opened.
+ */
+export function isWebPage(url: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch (error) {
+    // Node 22.0 has no URL.parse; an unparseable URL throws a TypeError.
+    if (error instanceof TypeError) return false;
+    throw error;
+  }
+  return (
+    parsed.protocol === 'https:' ||
+    (parsed.protocol === 'http:' &&
+      ['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname))
+  );
+}
+
 function openInBrowser(url: string): void {
+  if (!isWebPage(url)) return;
+  // Windows' own URL handler, without cmd: cmd would read the URL's `&` as
+  // the start of another command.
   const [command, args] =
     process.platform === 'darwin'
       ? ['open', [url]]
       : process.platform === 'win32'
-        ? ['cmd', ['/c', 'start', '', url]]
+        ? ['rundll32', ['url.dll,FileProtocolHandler', url]]
         : ['xdg-open', [url]];
-  // Best effort: the URL is printed too, so a missing opener costs nothing.
+  // Best effort: the URL is printed too, so a missing opener, or a URL that
+  // is not a web page, costs nothing.
   const child = spawn(command, args, { stdio: 'ignore', detached: true });
   child.on('error', () => undefined);
   child.unref();

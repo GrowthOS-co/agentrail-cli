@@ -18,6 +18,17 @@ export function memoryKeychain(): Keychain & { entries: Map<string, string> } {
   };
 }
 
+/**
+ * A keychain that cannot be used, as on a system without one or with one
+ * locked: every call throws, as the real one does.
+ */
+export function lockedKeychain(): Keychain {
+  const refuse = (): never => {
+    throw new Error('Platform secure storage failure: no keychain');
+  };
+  return { get: refuse, set: refuse, delete: refuse };
+}
+
 export interface TestRuntime {
   readonly runtime: Runtime;
   readonly stdout: () => string;
@@ -35,7 +46,7 @@ export async function testRuntime(options: {
   mcpUrl: string;
   terminal?: boolean;
   env?: Record<string, string>;
-  keychain?: Keychain | undefined;
+  keychain?: Keychain;
   cwd?: string;
   homeDir?: string;
   now?: () => Date;
@@ -80,7 +91,7 @@ export async function testRuntime(options: {
     },
     stdinIsTTY: terminal,
     fetch: options.fetch ?? globalThis.fetch,
-    keychain: 'keychain' in options ? options.keychain : memoryKeychain(),
+    keychain: options.keychain ?? memoryKeychain(),
     now: options.now ?? (() => new Date()),
     sleep: (milliseconds) => {
       sleeps.push(milliseconds);
