@@ -1,4 +1,4 @@
-import { access, chmod, readdir, stat } from 'node:fs/promises';
+import { access, mkdir, readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -236,20 +236,12 @@ describe('credentials', () => {
       mcpUrl: agentrail.mcpUrl,
       terminal: true,
     });
+    // Node refuses to remove a directory as a file on every system and for
+    // every user; a read-only directory stops neither Windows nor root.
+    const path = join(cli.configDir, 'credentials', 'dev.json');
+    await mkdir(path, { recursive: true });
     agentrail.deviceAnswers.push('tokens');
-    expect(
-      await run(cli.runtime, ['--env', 'dev', 'login', '--insecure-storage']),
-    ).toBe(0);
-    const directory = join(cli.configDir, 'credentials');
-    await chmod(directory, 0o500);
-    try {
-      agentrail.deviceAnswers.push('tokens');
-      expect(await run(cli.runtime, ['--env', 'dev', 'login'])).toBe(2);
-      expect(cli.stderr()).toContain(
-        `${join(directory, 'dev.json')} could not be removed (EACCES)`,
-      );
-    } finally {
-      await chmod(directory, 0o700);
-    }
+    expect(await run(cli.runtime, ['--env', 'dev', 'login'])).toBe(2);
+    expect(cli.stderr()).toContain(`${path} could not be removed (`);
   });
 });

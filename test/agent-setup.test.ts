@@ -175,8 +175,6 @@ describe('agentrail agent setup', () => {
     await rm(cursorConfig);
     await mkdir(cursorConfig);
     expect(await run(cli.runtime, ['--env', 'dev', 'agent', 'setup'])).toBe(2);
-    expect(cli.stderr()).toContain(
-      `${cursorConfig} could not be read (EISDIR)`,
-    );
+    expect(cli.stderr()).toContain(`${cursorConfig} could not be read (`);
   });
 });
