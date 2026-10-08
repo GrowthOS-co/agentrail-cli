@@ -1,6 +1,6 @@
 {
   "name": "agentrail-cli",
-  "version": "0.1.0-dev.1",
+  "version": "0.1.0-dev.2",
   "description": "The Agentrail command line: sign in, then use every Agentrail tool from a terminal or an AI coding agent.",
   "license": "Apache-2.0",
   "repository": {
