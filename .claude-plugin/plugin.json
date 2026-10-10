@@ -1,6 +1,6 @@
 {
   "name": "agentrail",
-  "version": "0.1.0-dev.2",
+  "version": "0.1.0-dev.3",
   "description": "Use Agentrail from Claude Code: see how AI coding agents treat a brand's product, run simulations and review them.",
   "author": { "name": "Agentrail" },
   "homepage": "https://github.com/GrowthOS-co/agentrail-cli",
